@@ -66,6 +66,11 @@ Returns the latest real-time data for a station (CV count + ML prediction).
 **Path parameters:**
 - `station_id` — station identifier (e.g. `28-may`)
 
+**Query parameters:**
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `zone` | string | ❌ | Zone type: `platform`, `wagon`, `bus`, `waiting` (default: all zones) |
+
 **Response:**
 ```json
 {
@@ -75,6 +80,12 @@ Returns the latest real-time data for a station (CV count + ML prediction).
   "density_score": 0.74,
   "congestion_label": "High",
   "source": "cv",
+  "zone": "platform",
+  "zones": {
+    "platform": { "person_count": 12, "density_score": 0.74, "label": "High" },
+    "wagon": { "person_count": 45, "density_score": 0.62, "label": "High" },
+    "waiting": { "person_count": 8, "density_score": 0.31, "label": "Low" }
+  },
   "ml_prediction": {
     "score": 0.71,
     "label": "High",
@@ -158,7 +169,7 @@ Returns predicted congestion for all 24 hours for a station (used for the hourly
 
 ### GET `/recommend`
 
-Returns the optimal departure window for a route, minimising congestion.
+Returns the optimal departure window and recommended transport mode for a route, minimising congestion.
 
 **Query parameters:**
 | Param | Type | Required | Description |
@@ -178,10 +189,16 @@ Returns the optimal departure window for a route, minimising congestion.
   "optimal_hour": 10,
   "predicted_load": 0.31,
   "congestion_label": "Low",
-  "reasoning": "Lowest average congestion across origin and destination stations between 05:00 and 23:00.",
+  "recommended_mode": "metro",
+  "reasoning": "Lowest average congestion across origin and destination stations between 05:00 and 23:00. Metro recommended over bus due to lower predicted congestion.",
   "current_load": 0.88,
   "current_hour": 8,
   "hours_until_optimal": 2,
+  "context": {
+    "weather": "rain",
+    "events_nearby": [],
+    "is_holiday": false
+  },
   "all_hours": [
     { "hour": 5, "score": 0.12 },
     { "hour": 6, "score": 0.21 },
@@ -218,6 +235,139 @@ Returns all stations ranked by current congestion (used for Station Intel tab).
     },
     "..."
   ]
+}
+```
+
+---
+
+### GET `/directions`
+
+Returns multi-criteria route options between two stations. This is the primary routing endpoint.
+
+**Query parameters:**
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `origin` | string | ✅ | Origin station/stop ID |
+| `dest` | string | ✅ | Destination station/stop ID |
+| `mode` | string | ❌ | Routing mode: `fastest`, `ease`, `least_transfers`, `most_walking` (default: `fastest`) |
+| `day` | integer | ❌ | Day of week 0–6 (default: today) |
+| `hour` | integer | ❌ | Departure hour 0–23 (default: now) |
+
+**Example:** `GET /directions?origin=icharishahar&dest=koroglu&mode=ease&hour=8`
+
+**Response:**
+```json
+{
+  "origin": "icharishahar",
+  "dest": "koroglu",
+  "mode": "ease",
+  "routes": [
+    {
+      "rank": 1,
+      "total_time_min": 22,
+      "total_transfers": 1,
+      "total_walking_min": 5,
+      "avg_congestion": 0.31,
+      "congestion_label": "Low",
+      "transport_modes": ["metro", "walk"],
+      "steps": [
+        {
+          "type": "metro",
+          "from": "icharishahar",
+          "to": "28-may",
+          "line": "red",
+          "duration_min": 12,
+          "congestion_score": 0.28
+        },
+        {
+          "type": "walk",
+          "from": "28-may",
+          "to": "28-may-green",
+          "duration_min": 3,
+          "description": "Transfer via underground passage"
+        },
+        {
+          "type": "metro",
+          "from": "28-may",
+          "to": "koroglu",
+          "line": "green",
+          "duration_min": 7,
+          "congestion_score": 0.34
+        }
+      ]
+    }
+  ],
+  "context": {
+    "weather": "clear",
+    "events_nearby": ["football match at Tofiq Bahramov Stadium, 19:00"]
+  }
+}
+```
+
+**Routing modes explained:**
+- `fastest` — minimises `total_time_min`
+- `ease` — minimises `avg_congestion` across all segments
+- `least_transfers` — minimises `total_transfers`
+- `most_walking` — maximises `total_walking_min` (walking segments replace short transit hops)
+
+---
+
+### GET `/predict/travel`
+
+Returns predicted travel time between two nodes.
+
+**Query parameters:**
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `origin` | string | ✅ | Origin station/stop ID |
+| `dest` | string | ✅ | Destination station/stop ID |
+| `hour` | integer | ❌ | Hour of day 0–23 (default: now) |
+| `day` | integer | ❌ | Day of week 0–6 (default: today) |
+
+**Response:**
+```json
+{
+  "origin": "icharishahar",
+  "dest": "koroglu",
+  "hour": 8,
+  "day": 1,
+  "predicted_travel_time_min": 19,
+  "confidence": 0.85,
+  "factors": {
+    "weather_impact": "none",
+    "event_impact": "minor",
+    "peak_hour_delay": true
+  }
+}
+```
+
+---
+
+### GET `/scraper/status`
+
+Returns the freshness and health of scraped data sources.
+
+**Response:**
+```json
+{
+  "sources": {
+    "weather": {
+      "last_updated": "2026-05-01T09:00:00Z",
+      "status": "ok",
+      "stale": false
+    },
+    "events": {
+      "last_updated": "2026-05-01T08:45:00Z",
+      "status": "ok",
+      "stale": false
+    },
+    "calendar": {
+      "last_updated": "2026-05-01T00:00:00Z",
+      "status": "ok",
+      "stale": false
+    }
+  },
+  "scrape_interval_minutes": 15
 }
 ```
 

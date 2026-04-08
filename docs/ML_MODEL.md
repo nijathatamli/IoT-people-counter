@@ -2,18 +2,22 @@
 
 ## Problem Statement
 
-Given a metro station and a time (hour-of-day + day-of-week), predict:
-1. **Congestion score** — a normalised value 0.0–1.0 representing platform density
+Given a metro station and a time (hour-of-day + day-of-week), enriched with external context (weather, events, calendar), predict:
+1. **Congestion score** — a normalised value 0.0–1.0 representing platform/wagon/bus density
 2. **Congestion label** — Low / Moderate / High / Peak
-3. **Best departure window** — the hour in a given day that minimises congestion for a given origin→destination route
+3. **Travel time** — estimated minutes between any two nodes in the network
+4. **Best departure window** — the hour in a given day that minimises congestion for a given origin→destination route
+5. **Best transport mode** — whether metro or bus is the better option for a given route and time
 
-This is a **regression problem** (predicting a continuous score) with a secondary classification output (the label).
+This is a **regression problem** (predicting continuous scores and durations) with secondary classification outputs (labels, mode recommendations).
 
 ---
 
 ## Feature Set
 
 ### Input features (inference time)
+
+**Core features (from ridership data):**
 
 | Feature | Type | Range | Description |
 |---------|------|-------|-------------|
@@ -23,6 +27,19 @@ This is a **regression problem** (predicting a continuous score) with a secondar
 | `is_weekend` | binary | 0/1 | Derived from day_of_week |
 | `station_weight` | float | 0.0–1.0 | Pre-computed centrality weight |
 | `is_interchange` | binary | 0/1 | Whether the station serves multiple lines |
+
+**Scraper-enriched features (from external context):**
+
+| Feature | Type | Range | Description |
+|---------|------|-------|-------------|
+| `temperature_c` | float | -10–45 | Current/forecast temperature in Celsius |
+| `precipitation` | binary | 0/1 | Rain or snow expected |
+| `wind_speed_kmh` | float | 0–100 | Wind speed |
+| `has_major_event` | binary | 0/1 | Concert, football match, large gathering nearby |
+| `event_distance_km` | float | 0–50 | Distance from station to nearest active event |
+| `is_holiday` | binary | 0/1 | National holiday or observance |
+| `is_ramadan` | binary | 0/1 | Ramadan period (affects evening travel patterns) |
+| `is_school_term` | binary | 0/1 | School in session (affects morning peak) |
 
 ### Cyclical encoding
 
@@ -35,16 +52,19 @@ dow_cos  = cos(2π × day  / 7)
 ```
 This prevents the model from treating the distance between hour 23 and hour 0 as large.
 
-### Feature vector (12 dimensions)
+### Feature vector (20+ dimensions)
 ```
 [station_onehot × 25] + [hour_sin, hour_cos, dow_sin, dow_cos, is_weekend, station_weight, is_interchange]
++ [temperature_c, precipitation, wind_speed_kmh, has_major_event, event_distance_km, is_holiday, is_ramadan, is_school_term]
 ```
+
+When scraper data is unavailable, scraper features default to neutral values (e.g., `temperature_c=20`, `precipitation=0`, `has_major_event=0`). The model gracefully degrades — scraper features improve accuracy but are not required.
 
 ---
 
 ## Model Architecture
 
-### Primary model: Gradient Boosted Regressor
+### Model 1: Congestion Predictor (Gradient Boosted Regressor)
 
 We use **XGBoost** for the congestion score regression.
 
@@ -65,6 +85,28 @@ XGBRegressor(
     random_state=42
 )
 ```
+
+### Model 2: Travel Time Predictor (`travel_time.py`)
+
+Predicts travel duration in minutes between any two nodes in the metro/bus network.
+
+**Input features:** origin_id, dest_id, hour, day_of_week, plus scraper features (weather, events)
+**Output:** predicted_travel_time_min (float)
+
+Uses the same XGBoost architecture. Training data is derived from base travel times in `data/network.json` with time-of-day multipliers (peak hours add 15–30% delay) and weather/event impact factors.
+
+```python
+XGBRegressor(
+    n_estimators=150,
+    max_depth=4,
+    learning_rate=0.05,
+    random_state=42
+)
+```
+
+### Model 3: Mode Advisor
+
+Not a separate model — uses the congestion predictor and travel time predictor together to compare metro vs. bus for a given O→D pair and recommend the better option based on predicted congestion and travel time.
 
 ### Fallback model: Analytical curve
 
@@ -137,18 +179,25 @@ Outputs:
 Given an origin station O and destination station D, we find the hour with the lowest predicted average congestion:
 
 ```python
-def best_departure(origin_id, dest_id, day_of_week):
+def best_departure(origin_id, dest_id, day_of_week, scraper_context=None):
     scores = {}
     for hour in range(5, 23):  # Metro operating hours
-        o_score = model.predict(origin_id, hour, day_of_week)
-        d_score = model.predict(dest_id, hour, day_of_week)
+        o_score = model.predict(origin_id, hour, day_of_week, context=scraper_context)
+        d_score = model.predict(dest_id, hour, day_of_week, context=scraper_context)
         scores[hour] = (o_score + d_score) / 2
-    
+
     best_hour = min(scores, key=scores.get)
+
+    # Compare metro vs bus for the best hour
+    metro_time = travel_time_model.predict(origin_id, dest_id, best_hour, mode="metro")
+    bus_time = travel_time_model.predict(origin_id, dest_id, best_hour, mode="bus")
+    recommended_mode = "metro" if metro_time <= bus_time else "bus"
+
     return {
         "optimal_hour": best_hour,
         "predicted_load": scores[best_hour],
         "label": congestion_label(scores[best_hour]),
+        "recommended_mode": recommended_mode,
         "all_hours": scores   # for the frontend chart
     }
 ```
@@ -175,11 +224,13 @@ A passenger arrives at D as well. If the origin is quiet but the destination is 
 
 ```
 ml/
-├── model.py          # Model class with .predict() and .best_departure() methods
-├── train.py          # Training script
-├── features.py       # Feature engineering functions
+├── model.py          # Congestion model class with .predict() and .best_departure()
+├── travel_time.py    # Travel time prediction between nodes
+├── train.py          # Training script (all models)
+├── features.py       # Feature engineering (incl. scraper feature merging)
 ├── evaluate.py       # Evaluation script with metrics and plots
-├── model.pkl         # Pre-trained model (committed to repo for demo)
+├── model.pkl         # Pre-trained congestion model (committed for demo)
+├── travel_model.pkl  # Pre-trained travel time model (committed for demo)
 └── requirements.txt  # xgboost, scikit-learn, pandas, numpy, joblib
 ```
 

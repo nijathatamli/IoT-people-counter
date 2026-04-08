@@ -11,8 +11,12 @@ We use a simple trunk-based approach:
 ```
 main              ← always demo-ready, protected
 ├── feat/cv-pipeline
+├── feat/cv-zones
+├── feat/scraper
 ├── feat/ml-model
+├── feat/ml-travel-time
 ├── feat/api-endpoints
+├── feat/api-directions
 └── feat/frontend-dashboard
 ```
 
@@ -36,8 +40,8 @@ refactor(frontend): extract CongestionBar component
 chore: update requirements.txt
 ```
 
-Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`  
-Scopes: `cv`, `ml`, `api`, `frontend`, `data`, `docs`
+Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
+Scopes: `cv`, `ml`, `api`, `frontend`, `scraper`, `data`, `docs`
 
 **Keep commits small and focused.** One logical change per commit. This makes debugging much easier during the hackathon.
 
@@ -138,7 +142,7 @@ function StationCard({ station, congestion }) {
 
 ## File Structure Rules
 
-- Each module (`cv/`, `ml/`, `api/`, `frontend/`) owns its own `requirements.txt` or `package.json`.
+- Each module (`cv/`, `ml/`, `api/`, `scraper/`, `frontend/`) owns its own `requirements.txt` or `package.json`.
 - Data files go in `data/`. Don't scatter CSVs or JSONs in module directories.
 - Tests go in a `tests/` folder inside each module.
 - Don't commit model weights to git (they're large). Add to `.gitignore`. Download script in `ml/download_weights.sh`.

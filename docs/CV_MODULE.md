@@ -2,12 +2,21 @@
 
 ## Overview
 
-The CV module processes camera feeds from metro station platforms and outputs real-time passenger counts and density estimates. It runs as an independent service that pushes results to the API.
+The CV module processes camera feeds from metro station platforms, metro wagons, buses, and station waiting areas, and outputs real-time passenger counts and density estimates per zone. It runs as an independent service that pushes results to the API.
+
+**Detection zones:**
+| Zone | Camera location | Use case |
+|------|----------------|----------|
+| `platform` | Overhead cameras on station platforms | Platform crowding before boarding |
+| `wagon` | In-car cameras inside metro wagons | On-board occupancy |
+| `bus` | On-board cameras inside buses | Bus crowding levels |
+| `waiting` | Cameras in station concourses/corridors | Waiting area density |
 
 **Key design principles:**
-- No raw video leaves the station (privacy by design)
+- No raw video leaves the station/vehicle (privacy by design)
 - Runs on modest hardware (Raspberry Pi 5 or entry-level GPU)
-- Graceful degradation: if the camera feed drops, the API falls back to ML predictions
+- Graceful degradation: if a camera feed drops, the API falls back to ML predictions
+- Each zone type has independent density calibration (different area, capacity thresholds)
 - Mock mode for development without camera hardware
 
 ---
@@ -103,6 +112,10 @@ class Detector:
 **Confidence threshold: 0.45**
 Lower than the default 0.5 because platform lighting is variable. Reduces false negatives at the cost of slightly more false positives. Validated on indoor crowd datasets.
 
+**Zone-specific considerations:**
+- **Wagon/bus cameras:** Closer proximity to passengers, more occlusion from standing crowds. May benefit from a slightly lower confidence threshold (0.40).
+- **Waiting area cameras:** Wider field of view, more open space, fewer occlusion issues.
+
 ### Step 4: Region of Interest (ROI) filtering
 
 Not all parts of the frame are the platform. We crop to the ROI defined per camera:
@@ -123,29 +136,38 @@ ROI polygons are defined in `data/stations.json` under `camera_roi` per station.
 
 ### Step 5: Density estimation
 
-Raw person count is converted to a normalised density score:
+Raw person count is converted to a normalised density score. Each zone type has its own area and capacity parameters defined in `cv/zones/`:
 
 ```python
-def estimate_density(count, platform_area_m2, persons_per_m2_max=2.5):
+def estimate_density(count, area_m2, persons_per_m2_max=2.5):
     """
     Based on Fruin Level of Service methodology:
     - LOS A: < 0.3 p/m² (free flow)
     - LOS C: 0.7–1.1 p/m² (restricted)
     - LOS E: 1.5–2.5 p/m² (near capacity)
     """
-    density = count / platform_area_m2
+    density = count / area_m2
     score = min(1.0, density / persons_per_m2_max)
     return score
 ```
 
-Platform areas are in `data/stations.json` under `platform_area_m2` (estimated from metro.gov.az floor plans and satellite imagery).
+**Zone calibration defaults:**
+| Zone | area_m2 | persons_per_m2_max | Notes |
+|------|---------|-------------------|-------|
+| `platform` | Per station (from `stations.json`) | 2.5 | Fruin LOS E |
+| `wagon` | ~36 m² (standard Baku metro car) | 4.0 | Standing capacity |
+| `bus` | ~20 m² (standard city bus interior) | 3.5 | Standing capacity |
+| `waiting` | Per station (from `stations.json`) | 2.0 | Concourse/corridor |
+
+Zone configs live in `cv/zones/` as JSON files per zone type.
 
 ### Step 6: Publishing
 
 ```python
-def publish(station_id, count, density_score, detections):
+def publish(station_id, zone_type, count, density_score, detections):
     payload = {
         "station_id": station_id,
+        "zone": zone_type,  # "platform", "wagon", "bus", "waiting"
         "timestamp": datetime.utcnow().isoformat(),
         "person_count": count,
         "density_score": density_score,
@@ -163,9 +185,11 @@ For development and the hackathon demo, `stream.py --mock` replaces the camera f
 
 ```bash
 python stream.py --mock --station "28-may" --interval 3
+python stream.py --mock --station "28-may" --zone wagon --interval 3
+python stream.py --mock --all-stations --all-zones --interval 3
 ```
 
-Mock mode uses the analytical congestion model to generate realistic person counts that match expected patterns for the current time of day. The output format is identical to real CV output — the API cannot distinguish between mock and real data.
+Mock mode uses the analytical congestion model to generate realistic person counts that match expected patterns for the current time of day across all zone types. The output format is identical to real CV output — the API cannot distinguish between mock and real data.
 
 ---
 
@@ -234,3 +258,5 @@ python benchmark.py --model yolov8n.pt --frames 100
 - **Camera angle:** YOLOv8 is trained on upright human images. Overhead cameras (common in metro stations) reduce accuracy. Fine-tuning on overhead crowd datasets would improve this.
 - **Lighting variation:** Platform lighting changes when trains arrive (lights from the train). Confidence threshold set conservatively to handle this.
 - **Single camera per station:** This prototype assumes one camera per platform. In practice, multiple cameras with view aggregation would improve accuracy.
+- **Wagon/bus motion:** Camera shake from vehicle movement can reduce detection accuracy. Frame stabilisation may be needed for production deployments.
+- **Bus coverage:** Bus interior cameras are a stretch goal — metro zones (platform, wagon, waiting) take priority for the hackathon.
